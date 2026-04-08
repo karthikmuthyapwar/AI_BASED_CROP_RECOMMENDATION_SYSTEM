@@ -1,0 +1,15 @@
+flask
+numpy==1.26.4
+pandas
+scikit-learn
+opencv-python==4.8.0.76
+easyocr
+tensorflow==2.16.1
+geopy
+imageio
+matplotlib
+imutils
+requests
+reverse_geocoder
+joblib
+geopandas
