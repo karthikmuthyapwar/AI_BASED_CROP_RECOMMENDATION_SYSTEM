@@ -64,3 +64,48 @@ Backend Development - Shivam Sawarn and Rashi Srivastava
 
 ##### The whole app is a prototype which has been made for project purposes only.
 
+
+## Run backend locally (quick start)
+
+1. Create and activate a virtual environment.
+2. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+3. Start the backend API:
+   ```bash
+   python3 Backend.py
+   ```
+
+### Windows / PowerShell note
+If you run this in PowerShell, use:
+```powershell
+python Backend.py
+```
+Do **not** run `timeout 10s python3 Backend.py` on Windows PowerShell.
+In PowerShell, `timeout` is a different built-in command and `10s` is invalid there, which causes the syntax error you saw.
+
+### Important required files
+The backend expects these files to exist in the repo:
+- Soil model JSON: `Saved Model/SoilNET model.json` (or `model.json`)
+- Crop model: `Saved Model/CRSML.sav` (or `finalized_model.sav`)
+- Crop dataset: `Cat_Crop.csv` or `Cat_Crops.csv`
+- Crop metadata: `Prediction.json`
+
+If `Cat_Crop.csv` / `Cat_Crops.csv` and `Prediction.json` are missing, the API will start but prediction requests will return an error until those files are added.
+
+## User control (your own database)
+
+You can now manage users in the backend directly using a local SQLite database file `maati.db` (auto-created on first run).
+
+### Auth endpoints
+- `POST /auth/register` with JSON: `{ "name": "...", "phone": "...", "password": "..." }`
+- `POST /auth/login` with JSON: `{ "phone": "...", "password": "..." }`
+- `GET /users/<user_id>/history` to fetch last 50 predictions for that user.
+
+### Prediction with user tracking
+Pass optional `user_id` in the main prediction payload (`POST /`) to save prediction history for that user.
+
+### Do you need a personal database?
+- **Not mandatory to start**: `maati.db` (SQLite) is enough for local/testing use.
+- **Recommended for production**: move to PostgreSQL/MySQL and deploy backend on a secure server.

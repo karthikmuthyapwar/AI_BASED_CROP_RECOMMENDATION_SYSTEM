@@ -1,250 +1,365 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-Created on Fri Nov 13 13:29:38 2020
+"""Flask backend for crop recommendation + basic user management."""
 
-@author: shivam
-"""
-#importing the libraries
-import json
-from flask import Flask, request, jsonify, Response
+from __future__ import annotations
+
 import base64
-import numpy as np
-import imageio
-import soilNET
-from matplotlib.pyplot import imshow
+import json
+import sqlite3
+from datetime import datetime, timezone
+from pathlib import Path
 
-from tensorflow.keras.preprocessing import image
-
-from types import SimpleNamespace
-import pandas as pd
-import geopandas as gpd
-import geopy
-import reverse_geocoder as rg
-from geopy.geocoders import Nominatim
-from geopy.extra.rate_limiter import RateLimiter
 import joblib
+import numpy as np
+import pandas as pd
+from flask import Flask, g, jsonify, request
+from geopy.geocoders import Nominatim
+from tensorflow.keras.preprocessing import image
+from werkzeug.security import check_password_hash, generate_password_hash
 
-#initializing flask
+import soilNET
+
 app = Flask(__name__)
 
+ROOT_DIR = Path(__file__).resolve().parent
+DB_PATH = ROOT_DIR / "maati.db"
 
-@app.route("/",methods=["POST"])
-def predict():                                      #defining prediction function
-    data=request.get_json(force=True)               #requesting data from client
-    base64_img=str(data['base64'])                  #extracting data 
-    file_name=data["ID"]
-    with open(file_name,'wb') as f:
+CROP_DATA_CANDIDATES = [ROOT_DIR / "Cat_Crop.csv", ROOT_DIR / "Cat_Crops.csv"]
+PREDICTION_INFO_CANDIDATES = [ROOT_DIR / "Prediction.json"]
+CROP_MODEL_CANDIDATES = [
+    ROOT_DIR / "finalized_model.sav",
+    ROOT_DIR / "Saved Model" / "CRSML.sav",
+]
+
+STATE_CODE_MAP = {
+    "Andhra Pradesh": 1,
+    "Arunachal Pradesh": 2,
+    "Assam": 3,
+    "Bihar": 4,
+    "Chhattisgarh": 5,
+    "Chhatisgarh": 5,
+    "Goa": 6,
+    "Gujarat": 7,
+    "Haryana": 8,
+    "Himachal Pradesh": 9,
+    "Jharkhand": 10,
+    "Karnataka": 11,
+    "Kerala": 12,
+    "Kerela": 12,
+    "Madhya Pradesh": 13,
+    "Maharashtra": 14,
+    "Manipur": 15,
+    "Meghalaya": 16,
+    "Mizoram": 17,
+    "Nagaland": 18,
+    "Odisha": 19,
+    "Punjab": 20,
+    "Rajasthan": 21,
+    "Sikkim": 22,
+    "Tamil Nadu": 23,
+    "Telangana": 24,
+    "Tripura": 25,
+    "Uttar Pradesh": 26,
+    "Uttarakhand": 27,
+    "West Bengal": 28,
+    "Andaman and Nicobar Islands": 29,
+    "Andaman and Nicobar Island": 29,
+    "Dadra Nagar Haveli and Daman and Diu": 30,
+    "Chandigarh": 31,
+    "Delhi": 32,
+    "Jammu and Kashmir": 33,
+    "Lakshadweep": 34,
+    "Puducherry": 35,
+    "Pudducherry": 35,
+    "Ladakh": 36,
+}
+
+SOIL_CODE_MAP = {
+    "Alluvial": 1,
+    "Black": 2,
+    "Clayey": 3,
+    "Latterite": 4,
+    "Red": 5,
+    "Sandy": 6,
+}
+
+
+def _first_existing(paths):
+    for path in paths:
+        if path.exists():
+            return path
+    return None
+
+
+def _error(message, status=400):
+    return jsonify({"error": message}), status
+
+
+def _get_json() -> dict:
+    payload = request.get_json(silent=True)
+    return payload if isinstance(payload, dict) else {}
+
+
+def get_db():
+    if "db" not in g:
+        g.db = sqlite3.connect(DB_PATH)
+        g.db.row_factory = sqlite3.Row
+    return g.db
+
+
+@app.teardown_appcontext
+def close_db(_error_obj):
+    db = g.pop("db", None)
+    if db is not None:
+        db.close()
+
+
+def init_db():
+    db = sqlite3.connect(DB_PATH)
+    cursor = db.cursor()
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            phone TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS prediction_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            predicted_crop TEXT NOT NULL,
+            input_payload TEXT NOT NULL,
+            output_payload TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        )
+        """
+    )
+    db.commit()
+    db.close()
+
+
+def _save_prediction_history(user_id: int, predicted_crop: str, input_payload: dict, output_payload: dict):
+    db = get_db()
+    db.execute(
+        """
+        INSERT INTO prediction_history (user_id, predicted_crop, input_payload, output_payload, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            user_id,
+            predicted_crop,
+            json.dumps(input_payload),
+            json.dumps(output_payload),
+            datetime.now(timezone.utc).isoformat(),
+        ),
+    )
+    db.commit()
+
+
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({"status": "ok"})
+
+
+@app.route("/auth/register", methods=["POST"])
+def register_user():
+    data = _get_json()
+    name = str(data.get("name", "")).strip()
+    phone = str(data.get("phone", "")).strip()
+    password = str(data.get("password", "")).strip()
+
+    if not name or not phone or not password:
+        return _error("name, phone and password are required.")
+
+    if len(password) < 6:
+        return _error("Password must be at least 6 characters long.")
+
+    db = get_db()
+    try:
+        db.execute(
+            "INSERT INTO users (name, phone, password_hash, created_at) VALUES (?, ?, ?, ?)",
+            (name, phone, generate_password_hash(password), datetime.now(timezone.utc).isoformat()),
+        )
+        db.commit()
+    except sqlite3.IntegrityError:
+        return _error("User already exists with this phone number.", status=409)
+
+    return jsonify({"message": "User registered successfully."}), 201
+
+
+@app.route("/auth/login", methods=["POST"])
+def login_user():
+    data = _get_json()
+    phone = str(data.get("phone", "")).strip()
+    password = str(data.get("password", "")).strip()
+
+    if not phone or not password:
+        return _error("phone and password are required.")
+
+    db = get_db()
+    row = db.execute("SELECT id, name, phone, password_hash FROM users WHERE phone = ?", (phone,)).fetchone()
+    if row is None or not check_password_hash(row["password_hash"], password):
+        return _error("Invalid phone or password.", status=401)
+
+    return jsonify({"user_id": row["id"], "name": row["name"], "phone": row["phone"]})
+
+
+@app.route("/users/<int:user_id>/history", methods=["GET"])
+def prediction_history(user_id: int):
+    db = get_db()
+    user = db.execute("SELECT id FROM users WHERE id = ?", (user_id,)).fetchone()
+    if user is None:
+        return _error("User not found.", status=404)
+
+    rows = db.execute(
+        """
+        SELECT predicted_crop, input_payload, output_payload, created_at
+        FROM prediction_history
+        WHERE user_id = ?
+        ORDER BY id DESC
+        LIMIT 50
+        """,
+        (user_id,),
+    ).fetchall()
+
+    history = [
+        {
+            "predicted_crop": row["predicted_crop"],
+            "input": json.loads(row["input_payload"]),
+            "output": json.loads(row["output_payload"]),
+            "created_at": row["created_at"],
+        }
+        for row in rows
+    ]
+    return jsonify({"user_id": user_id, "history": history})
+
+
+@app.route("/", methods=["POST"])
+def predict():
+    data = _get_json()
+
+    required_keys = ["base64", "ID", "Loc_Cordinates", "Temperature", "date"]
+    missing = [key for key in required_keys if key not in data]
+    if missing:
+        return _error(f"Missing required fields: {missing}")
+
+    base64_img = str(data["base64"])
+    file_name = str(data["ID"])
+    with open(file_name, "wb") as f:
         f.write(base64.b64decode(base64_img))
-    image_path= file_name                           #reading the image received from client
-    img = image.load_img(image_path)
-    img = img.resize((150,150))
+
+    img = image.load_img(file_name)
+    img = img.resize((150, 150))
     x = image.img_to_array(img)
     x = np.expand_dims(x, axis=0)
-    x = x/255.0
-    #print('Input image shape:', x.shape)
-    #my_image = imageio.imread(image_path)
-    #imshow(my_image)
-    #print("class prediction vector [Alluvial, Black, Clayey, Latterite, Red, Sandy] = ")
-    prediction=(soilNET.model.predict(x))*100       #predicting soil type based on SoilNET
-    max_i = np.argmax(prediction) 
-    if max_i==0:                                    #categorizing soil type based on highest probability obtained using SoilNET prediction
-        soil="Alluvial"
-    elif max_i==1:
-        soil="Black"
-    elif max_i==2:
-        soil="Clayey"
-    elif max_i==3:
-        soil="Latterite"
-    elif max_i==4:
-        soil="Red"
-    elif max_i==5:
-        soil="Sandy"
-        
-    types = soil
-    
-    if types=="Alluvial":                           #Restructuring soil type to specific codes according to model input
-        soil_type = 1
-    elif types == "Red":
-        soil_type = 2
-    elif types == "Clayey":
-        soil_type = 3
-    elif types == "Latterite":
-        soil_type = 4
-    elif types == "Red":
-        soil_type = 5
-    elif types == "Sandy":
-       soil_type = 6
-    
-    coordinates = data["Loc_Cordinates"]            #extracting location coordinates
-    coordinates = str(coordinates)                  
-    locator = Nominatim(user_agent="myGeocoder")    #retrieving name of the state based on coordinates
-    location = locator.reverse(coordinates)
-    loc_dict=location.raw
-    state=(loc_dict.get('address').get('state'))
-    
-    state_code=0                
+    x = x / 255.0
 
-    if state=="Andhra Pradesh":                     #converting state name to specific code according to the model input
-        state_code=1
-    elif state=="Arunachal Pradesh":
-        state_code=2 
-    elif state=="Assam":
-        state_code=3 
-    elif state=="Bihar":
-        state_code=4 
-    elif state=="Chhatisgarh":
-        state_code=5 
-    elif state=="Goa":
-        state_code=6 
-    elif state=="Gujarat":
-        state_code=7 
-    elif state=="Haryana":
-        state_code=8 
-    elif state=="Himachal Pradesh":
-        state_code=9 
-    elif state=="Jharkhand":
-        state_code=10
-    elif state=="Karnataka":
-        state_code=11 
-    elif state=="Kerela":
-        state_code=12
-    elif state=="Madhya Pradesh":
-        state_code=13
-    elif state=="Maharashtra":
-        state_code=14
-    elif state=="Manipur":
-        state_code=15
-    elif state=="Meghalaya":
-        state_code=16
-    elif state=="Mizoram":
-        state_code=17
-    elif state=="Nagaland":
-        state_code=18 
-    elif state=="Odisha":
-        state_code=19 
-    elif state=="Punjab":
-        state_code=20
-    elif state=="Rajasthan":
-        state_code=21
-    elif state=="Sikkim":
-        state_code=22 
-    elif state=="Tamil Nadu":
-        state_code=23 
-    elif state=="Telangana":
-        state_code=24 
-    elif state=="Tripura":
-        state_code=25 
-    elif state=="Uttar Pradesh":
-        state_code=26 
-    elif state=="Uttarakhand":
-        state_code=27 
-    elif state=="West Bengal":
-        state_code=28 
-    elif state=="Andaman and Nicobar Island":
-        state_code=29 
-    elif state=="Dadra Nagar Haveli and Daman and Diu":
-        state_code=30 
-    elif state=="Chandigarh":
-        state_code=31 
-    elif state=="Delhi":
-        state_code=32 
-    elif state=="Jammu and Kashmir":
-        state_code=33 
-    elif state=="Lakshadweep":
-        state_code=34 
-    elif state=="Pudducherry":
-        state_code=35 
-    elif state=="Ladakh":
-        state_code=36
-    
-    state = state_code
-    
-    file = pd.read_csv("Cat_Crop.csv")                          #reading csv file into dataframe
-    data_frame = file.loc[file["States"]==state, "Rainfall"]    #extracting average rainfall data according to state code
-    rain = float(data_frame.unique())
-    
-    df = file.loc[file["States"]==state,"Ground Water"]         #extracting ground water availability according to state code
-    ground_water = float(df.unique())
-    
-    temp = data["Temperature"]                                  #extracting temperature from data received from the client
-    #print(type(temp))
-    temp = float(temp)
-    
-    date = data["date"]                                         #extracting date from data received from the client                                    
-    #print(type(date))
-    date = str(date)
-    month=int(date[5:7])                                        #extracting month from the data received
-    #print(month)
-    #month=5
-    season=4
-    if month == 11 or month == 12 or month==1 or month==2:      #converting months to specific code according to the model input
-        season=2
-        
-    elif month==6 or month==7 or month==8 or month==9:
-        season=1
-    elif month==3 or month==4:
-        season=3
+    prediction = soilNET.model.predict(x, verbose=0) * 100
+    max_i = int(np.argmax(prediction))
+    soil = ["Alluvial", "Black", "Clayey", "Latterite", "Red", "Sandy"][max_i]
+    soil_type = SOIL_CODE_MAP[soil]
+
+    coordinates = str(data["Loc_Cordinates"])
+    locator = Nominatim(user_agent="maati_backend")
+    try:
+        location = locator.reverse(coordinates)
+    except Exception as exc:  # noqa: BLE001
+        return _error(f"Location lookup failed: {exc}", status=422)
+
+    if location is None or "address" not in location.raw:
+        return _error("Could not resolve state from coordinates.", status=422)
+
+    state = location.raw.get("address", {}).get("state")
+    state_code = STATE_CODE_MAP.get(state)
+    if state_code is None:
+        return _error(f"Unsupported state from coordinates: {state}", status=422)
+
+    crop_data_file = _first_existing(CROP_DATA_CANDIDATES)
+    if crop_data_file is None:
+        return _error(
+            f"Crop dataset not found. Expected one of: {', '.join(str(p) for p in CROP_DATA_CANDIDATES)}",
+            status=500,
+        )
+
+    file_df = pd.read_csv(crop_data_file)
+    data_frame = file_df.loc[file_df["States"] == state_code, "Rainfall"]
+    if data_frame.empty:
+        return _error("Rainfall data unavailable for resolved state.", status=422)
+    rain = float(data_frame.unique()[0])
+
+    df = file_df.loc[file_df["States"] == state_code, "Ground Water"]
+    if df.empty:
+        return _error("Ground water data unavailable for resolved state.", status=422)
+    ground_water = float(df.unique()[0])
+
+    temp = float(data["Temperature"])
+    date = str(data["date"])
+    month = int(date[5:7])
+
+    if month in [11, 12, 1, 2]:
+        season = 2
+    elif month in [6, 7, 8, 9]:
+        season = 1
+    elif month in [3, 4]:
+        season = 3
     else:
         season = 4
-    
-    
-    input_dict={}                                               #creating  a dictionary of all the data extracted to be fed to the model for crop predictions
-    
-    input_dict["States"] = state_code
-    input_dict["Rainfall"] = rain
-    input_dict["Ground Water"] = ground_water
-    input_dict["Temperature"] = temp
-    input_dict["Soil_type"] = soil_type
-    input_dict["Season"] = season
-    
-    output = json.dumps(input_dict)
-    with open("input.json","w") as sout:
-        sout.write(output)
-    filename = "finalized_model.sav"
-    loaded_model = joblib.load(filename)
-    
-    file_path = "input.json"
-    with open(file_path) as f:
-      data = json.load(f)
-    temp=list(data.values())
-    
-    
-    inp_array=np.array(temp)                                    #restructing data according to model input
-    inp_array=inp_array.reshape(1,-1)
-    #print(inp_array)
-    prediction=loaded_model.predict(inp_array)
-    #print(prediction)
-    prediction = list(prediction)
-    
-    pred_crop_name = prediction[0]
-   
-    jsonFilePath = "Prediction.json"                            #Extracting information related to predicted crop            
-    with open (jsonFilePath) as fp:
-        Final_rec = json.load(fp)
-    final_pred = Final_rec[pred_crop_name]
-    #print(final_pred)
-    
-    Final_dict = {
-        "Data" : final_pred
-        }
-    
-    
-    output=json.dumps(Final_dict)                               #Exporting the final JSON File back to the client
-    with open("final.json","w") as sout:
-        sout.write(output)
-    return output
-    
+
+    input_dict = {
+        "States": state_code,
+        "Rainfall": rain,
+        "Ground Water": ground_water,
+        "Temperature": temp,
+        "Soil_type": soil_type,
+        "Season": season,
+    }
+
+    crop_model_file = _first_existing(CROP_MODEL_CANDIDATES)
+    if crop_model_file is None:
+        return _error(
+            f"Crop model file not found. Expected one of: {', '.join(str(p) for p in CROP_MODEL_CANDIDATES)}",
+            status=500,
+        )
+
+    loaded_model = joblib.load(crop_model_file)
+    inp_array = np.array(list(input_dict.values())).reshape(1, -1)
+    pred_crop_name = loaded_model.predict(inp_array)[0]
+
+    prediction_info_file = _first_existing(PREDICTION_INFO_CANDIDATES)
+    if prediction_info_file is None:
+        return _error(
+            f"Prediction metadata not found. Expected: {', '.join(str(p) for p in PREDICTION_INFO_CANDIDATES)}",
+            status=500,
+        )
+
+    with prediction_info_file.open(encoding="utf-8") as fp:
+        final_rec = json.load(fp)
+
+    final_pred = final_rec.get(pred_crop_name)
+    if final_pred is None:
+        return _error(f"No crop metadata found for prediction '{pred_crop_name}'.", status=422)
+
+    final_dict = {"Data": final_pred}
+
+    user_id = data.get("user_id")
+    if user_id is not None:
+        try:
+            _save_prediction_history(int(user_id), str(pred_crop_name), input_dict, final_dict)
+        except Exception:
+            # Do not fail crop prediction if history persistence fails.
+            pass
+
+    return jsonify(final_dict)
+
 
 if __name__ == "__main__":
+    init_db()
     app.run()
-    
-    
-    
-
-        
-        
-        
-        
-                 
-    
