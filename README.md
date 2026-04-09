@@ -64,3 +64,24 @@ Backend Development - Shivam Sawarn and Rashi Srivastava
 
 ##### The whole app is a prototype which has been made for project purposes only.
 
+
+## Run backend locally (quick start)
+
+1. Create and activate a virtual environment.
+2. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+3. Start the backend API:
+   ```bash
+   python3 Backend.py
+   ```
+
+### Important required files
+The backend expects these files to exist in the repo:
+- Soil model JSON: `Saved Model/SoilNET model.json` (or `model.json`)
+- Crop model: `Saved Model/CRSML.sav` (or `finalized_model.sav`)
+- Crop dataset: `Cat_Crop.csv` or `Cat_Crops.csv`
+- Crop metadata: `Prediction.json`
+
+If `Cat_Crop.csv` / `Cat_Crops.csv` and `Prediction.json` are missing, the API will start but prediction requests will return an error until those files are added.
