@@ -89,10 +89,12 @@ In PowerShell, `timeout` is a different built-in command and `10s` is invalid th
 The backend expects these files to exist in the repo:
 - Soil model JSON: `Saved Model/SoilNET model.json` (or `model.json`)
 - Crop model: `Saved Model/CRSML.sav` (or `finalized_model.sav`)
-- Crop dataset: `Cat_Crop.csv` or `Cat_Crops.csv`
-- Crop metadata: `Prediction.json`
+- Crop dataset: `Cat_Crop.csv` / `Cat_Crops.csv` (either in project root or in `Datasets/`)
+- Crop metadata: `Prediction.json` (either in project root or in `Datasets/`)
 
-If `Cat_Crop.csv` / `Cat_Crops.csv` and `Prediction.json` are missing, the API will start but prediction requests will return an error until those files are added.
+`Prediction.json` is **not auto-created** by running `Backend.py`. You must keep that file in the project manually (root or `Datasets/`).
+
+If dataset/metadata files are missing, the API will start but prediction requests will return an error until those files are added.
 
 ## User control (your own database)
 

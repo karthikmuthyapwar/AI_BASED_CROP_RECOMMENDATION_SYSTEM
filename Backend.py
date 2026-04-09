@@ -25,8 +25,16 @@ app = Flask(__name__)
 ROOT_DIR = Path(__file__).resolve().parent
 DB_PATH = ROOT_DIR / "maati.db"
 
-CROP_DATA_CANDIDATES = [ROOT_DIR / "Cat_Crop.csv", ROOT_DIR / "Cat_Crops.csv"]
-PREDICTION_INFO_CANDIDATES = [ROOT_DIR / "Prediction.json"]
+CROP_DATA_CANDIDATES = [
+    ROOT_DIR / "Cat_Crop.csv",
+    ROOT_DIR / "Cat_Crops.csv",
+    ROOT_DIR / "Datasets" / "Cat_Crop.csv",
+    ROOT_DIR / "Datasets" / "Cat_Crops.csv",
+]
+PREDICTION_INFO_CANDIDATES = [
+    ROOT_DIR / "Prediction.json",
+    ROOT_DIR / "Datasets" / "Prediction.json",
+]
 CROP_MODEL_CANDIDATES = [
     ROOT_DIR / "finalized_model.sav",
     ROOT_DIR / "Saved Model" / "CRSML.sav",
